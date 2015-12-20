@@ -35,7 +35,6 @@ from mysql.utilities.common.sql_transform import quote_with_backticks
 from mysql.utilities.common.table import Table
 from mysql.utilities.exception import UtilError, UtilDBError
 
-
 _RPL_COMMANDS, _RPL_FILE = 0, 1
 _RPL_PREFIX = "--"
 _SESSION_BINLOG_OFF1 = "SET @MYSQLUTILS_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;"
@@ -155,6 +154,7 @@ def _export_metadata(source, db_list, output_file, options):
                        skip_data, no_header, display, format,
                        debug, exclude_names, exclude_patterns)
     """
+    from collections import defaultdict
     frmt = options.get("format", "sql")
     no_headers = options.get("no_headers", False)
     column_type = options.get("display", "brief")
@@ -167,6 +167,7 @@ def _export_metadata(source, db_list, output_file, options):
     skip_funcs = options.get("skip_funcs", False)
     skip_events = options.get("skip_events", False)
     skip_grants = options.get("skip_grants", False)
+    trailing_data = defaultdict(list)
 
     for db_name in db_list:
 
@@ -215,10 +216,19 @@ def _export_metadata(source, db_list, output_file, options):
                        (dbobj[0] == "EVENT" and not skip_events) or \
                        (dbobj[0] == "TRIGGER" and not skip_triggers):
                         output_file.write("DELIMITER ||\n")
-                    output_file.write("{0};\n".format(
-                        db.get_create_statement(db.db_name, dbobj[1][0],
-                                                dbobj[0])
-                    ))
+
+                    create_statement = db.get_create_statement(db.db_name, dbobj[1][0], dbobj[0])
+
+                    if dbobj[0] == "VIEW" and not skip_views:
+                        # Append the CREATE statement to a trailing buffer
+                        #  and add the preliminary CREATE VIEW to the output_file.
+                        trailing_data[db.q_db_name].append(create_statement.replace("CREATE ", "CREATE OR REPLACE "))
+                        create_statement = create_preliminary_view(
+                                create_statement
+                        )
+
+                    output_file.write("{0};\n".format(create_statement))
+
                     if (dbobj[0] == "PROCEDURE" and not skip_procs) or \
                        (dbobj[0] == "FUNCTION" and not skip_funcs) or \
                        (dbobj[0] == "EVENT" and not skip_events) or \
@@ -271,8 +281,56 @@ def _export_metadata(source, db_list, output_file, options):
                     else:  # default to table format
                         format_tabular_list(output_file, rows[0], rows[1])
 
+    # Dump definitive views for all databases.
+    if not quiet:
+        output_file.write("# Exporting definitive views for all databases.\n")
+    for db_name, statements in trailing_data.iteritems():
+        if not quiet:
+            output_file.write("# Exporting definitive views for {0}.\n".format(db_name))
+        output_file.write("USE {0};\n".format(db_name))
+        for stmt in statements:
+            output_file.write("{0};\n".format(stmt))
+
     if not quiet:
         output_file.write("#...done.\n")
+
+
+def create_preliminary_view(create_view_stmt):
+    """
+    Generate a preliminary view statement from a concrete view one.
+    Preliminary stmt are already '\n'-terminated.
+
+    :param create_view_stmt:
+    :return: A preliminary statement terminated by ";\n"
+    """
+    import re
+    # A regexp matching CREATE VIEW syntax, including:
+    #   - subquery and SELECT UNION
+    # We can skip everything after FROM, including UNION queries, because
+    #  only the labels of the first SELECT are taken into account.
+    # We're using re.DOTALL to manage indented/prettified views.
+    re_view = re.compile(
+        r'(?P<create>CREATE.*?) VIEW (?P<name>[^ ]+)\s+AS[\s(]+SELECT(?P<select>.*?)(\s+FROM\s+.*)?$',
+        re.DOTALL | re.I)
+    # Labels are always properly `quoted`.
+    re_field = re.compile(r'( AS `[^`]+`)', re.IGNORECASE)
+    create_view_stmt_replace = create_view_stmt.replace('\n', ' ')
+    m = re_view.search(create_view_stmt_replace)
+    if not m:
+        # If we don't match the current view, then we have a bug. In that
+        # case add the CREATE VIEW statement to the unittest and fix it.
+        raise SyntaxError("Error processing %r" % create_view_stmt)
+
+    view_findall = re_view.findall(create_view_stmt_replace)[0]
+    create_view, name, fields = view_findall[:3]
+    join_v = ",".join(['1 %s' % x for x in re_field.findall(fields)])
+
+    create_view_stmt = "{0} VIEW {1} AS SELECT {2};\n".format(
+            create_view,
+            name,
+            join_v
+    )
+    return create_view_stmt
 
 
 def _export_row(data_rows, cur_table, out_format, single, skip_blobs,
