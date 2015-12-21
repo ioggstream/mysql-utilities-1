@@ -155,6 +155,7 @@ def _export_metadata(source, db_list, output_file, options):
                        skip_data, no_header, display, format,
                        debug, exclude_names, exclude_patterns)
     """
+    from collections import defaultdict
     frmt = options.get("format", "sql")
     no_headers = options.get("no_headers", False)
     column_type = options.get("display", "brief")
@@ -167,6 +168,7 @@ def _export_metadata(source, db_list, output_file, options):
     skip_funcs = options.get("skip_funcs", False)
     skip_events = options.get("skip_events", False)
     skip_grants = options.get("skip_grants", False)
+    trailing_data = defaultdict(list)
 
     for db_name in db_list:
 
@@ -176,7 +178,7 @@ def _export_metadata(source, db_list, output_file, options):
         # Export database metadata
         if not quiet:
             output_file.write(
-                "# Exporting metadata from {0}\n".format(db.db_name)
+                    "# Exporting metadata from {0}\n".format(db.db_name)
             )
 
         # Perform the extraction
@@ -184,10 +186,10 @@ def _export_metadata(source, db_list, output_file, options):
             db.init()
             if not skip_create:
                 output_file.write(
-                    "DROP DATABASE IF EXISTS {0};\n".format(db.q_db_name)
+                        "DROP DATABASE IF EXISTS {0};\n".format(db.q_db_name)
                 )
                 output_file.write(
-                    "CREATE DATABASE {0};\n".format(db.q_db_name)
+                        "CREATE DATABASE {0};\n".format(db.q_db_name)
                 )
             output_file.write("USE {0};\n".format(db.q_db_name))
             for dbobj in db.get_next_object():
@@ -196,33 +198,43 @@ def _export_metadata(source, db_list, output_file, options):
                         output_file.write("# Grant:\n")
                     if dbobj[1][3]:
                         create_str = "GRANT {0} ON {1}.{2} TO {3};\n".format(
-                            dbobj[1][1], db.q_db_name,
-                            quote_with_backticks(dbobj[1][3]), dbobj[1][0]
+                                dbobj[1][1], db.q_db_name,
+                                quote_with_backticks(dbobj[1][3]), dbobj[1][0]
                         )
                     else:
                         create_str = "GRANT {0} ON {1}.* TO {2};\n".format(
-                            dbobj[1][1], db.q_db_name, dbobj[1][0]
+                                dbobj[1][1], db.q_db_name, dbobj[1][0]
                         )
                     output_file.write(create_str)
                 else:
+                    print (dbobj)
                     if not quiet:
                         output_file.write(
-                            "# {0}: {1}.{2}\n".format(dbobj[0], db.db_name,
-                                                      dbobj[1][0])
+                                "# {0}: {1}.{2}\n".format(dbobj[0], db.db_name,
+                                                          dbobj[1][0])
                         )
                     if (dbobj[0] == "PROCEDURE" and not skip_procs) or \
-                       (dbobj[0] == "FUNCTION" and not skip_funcs) or \
-                       (dbobj[0] == "EVENT" and not skip_events) or \
-                       (dbobj[0] == "TRIGGER" and not skip_triggers):
+                            (dbobj[0] == "FUNCTION" and not skip_funcs) or \
+                            (dbobj[0] == "EVENT" and not skip_events) or \
+                            (dbobj[0] == "TRIGGER" and not skip_triggers):
                         output_file.write("DELIMITER ||\n")
-                    output_file.write("{0};\n".format(
-                        db.get_create_statement(db.db_name, dbobj[1][0],
-                                                dbobj[0])
-                    ))
+                    create_statement = "{0};\n".format(
+                            db.get_create_statement(db.db_name, dbobj[1][0], dbobj[0])
+                    )
+                    if dbobj[0] == "VIEW" and not skip_views:
+                        # Append the drop and create statement to a trailing buffer.
+                        trailing_data[db.q_db_name].append("DROP VIEW IF EXISTS {0};\n".format(
+                                dbobj[1][0]
+                        ))
+                        trailing_data[db.q_db_name].append(create_statement)
+                        create_statement = create_preliminary_view(create_statement)
+
+                    output_file.write(create_statement)
+
                     if (dbobj[0] == "PROCEDURE" and not skip_procs) or \
-                       (dbobj[0] == "FUNCTION" and not skip_funcs) or \
-                       (dbobj[0] == "EVENT" and not skip_events) or \
-                       (dbobj[0] == "TRIGGER" and not skip_triggers):
+                            (dbobj[0] == "FUNCTION" and not skip_funcs) or \
+                            (dbobj[0] == "EVENT" and not skip_events) or \
+                            (dbobj[0] == "TRIGGER" and not skip_triggers):
                         output_file.write("||\n")
                         output_file.write("DELIMITER ;\n")
         else:
@@ -235,6 +247,7 @@ def _export_metadata(source, db_list, output_file, options):
                 objects.append("PROCEDURE")
             if not skip_views:
                 objects.append("VIEW")
+                print("XXX", objects)  ## FIXME
             if not skip_triggers:
                 objects.append("TRIGGER")
             if not skip_events:
@@ -243,7 +256,7 @@ def _export_metadata(source, db_list, output_file, options):
                 objects.append("GRANT")
             for obj_type in objects:
                 output_file.write(
-                    "# {0}S in {1}:".format(obj_type, db.db_name)
+                        "# {0}S in {1}:".format(obj_type, db.db_name)
                 )
                 if frmt in ('grid', 'vertical'):
                     rows = db.get_db_objects(obj_type, column_type, True)
@@ -271,8 +284,31 @@ def _export_metadata(source, db_list, output_file, options):
                     else:  # default to table format
                         format_tabular_list(output_file, rows[0], rows[1])
 
+    # Dump definitive views for all databases.
+    if not quiet:
+        output_file.write("# Exporting definitive views for all databases.\n")
+    for db_name, statements in trailing_data.iteritems():
+        if not quiet:
+            output_file.write("# Exporting definitive views for {0}.\n".format(db_name))
+        output_file.write("USE {0};\n".format(db_name))
+        for stmt in statements:
+            output_file.write(stmt)
+
     if not quiet:
         output_file.write("#...done.\n")
+
+
+def create_preliminary_view(create_view_stmt):
+    # Create the mock statement.
+    import re
+    re_view = re.compile(r'( as select | from )', re.IGNORECASE)
+    create_view, _, fields = re_view.split(create_view_stmt)[:3]
+    create_view_stmt = "{0} AS SELECT {1};\n".format(
+            create_view,
+            ",".join(('1 %s' % x for x
+                      in re.findall(r'( AS [^,]+)', fields)))
+    )
+    return create_view_stmt
 
 
 def _export_row(data_rows, cur_table, out_format, single, skip_blobs,
